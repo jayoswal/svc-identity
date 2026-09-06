@@ -11,6 +11,17 @@ from app.main import app
 from app.seed import seed_demo_data
 
 
+@pytest.fixture(autouse=True)
+def _no_amqp_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Employee endpoints publish employee.* after commit; stub it out so tests
+    don't attempt a real AMQP connection (no broker is available in tests)."""
+
+    async def noop_publish(*_: object, **__: object) -> None:
+        return None
+
+    monkeypatch.setattr("app.api.employees.publish", noop_publish)
+
+
 @pytest.fixture
 def db() -> Iterator[Session]:
     engine = create_engine(

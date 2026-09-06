@@ -169,3 +169,12 @@ def authenticate(db: Session, email: str, password: str) -> Employee:
 
 def employee_count(db: Session) -> int:
     return db.scalar(select(func.count()).select_from(Employee)) or 0
+
+
+def serialize_change(value: object) -> object:
+    """Make a raw update-payload value JSON-safe for the employee.updated event."""
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, list):
+        return [serialize_change(item) for item in value]
+    return value

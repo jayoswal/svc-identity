@@ -1,12 +1,13 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.auth import Claims, active_user, require
 from ..core.errors import AppError
 from ..db import get_db
+from ..events import publish
 from ..models import Employee, EmployeeStatus
 from ..schemas import (
     EmployeeCreate,
@@ -25,6 +26,7 @@ from ..services.identity import (
     get_employee,
     lock_employee_hierarchy,
     resolve_roles,
+    serialize_change,
 )
 
 router = APIRouter(prefix="/api/v1/identity", tags=["Employees"])
@@ -83,8 +85,9 @@ def list_employees(
 @router.post(
     "/employees", response_model=EmployeeCreated, status_code=status.HTTP_201_CREATED
 )
-def create_employee(
+async def create_employee(
     payload: EmployeeCreate,
+    request: Request,
     _: Claims = Depends(require("HR_ADMIN")),
     db: Session = Depends(get_db),
 ) -> EmployeeCreated:
@@ -104,6 +107,21 @@ def create_employee(
     )
     db.add(employee)
     commit_employee(db, employee)
+    await publish(
+        "identity.events",
+        "employee.created",
+        {
+            "employee_id": str(employee.id),
+            "email": employee.email,
+            "full_name": employee.full_name,
+            "cost_center": employee.cost_center,
+            "manager_id": str(employee.manager_id) if employee.manager_id else None,
+            "home_currency": employee.home_currency,
+            "pto_entitlement_days": employee.pto_entitlement_days,
+            "status": employee.status,
+        },
+        request.state.correlation_id,
+    )
     return EmployeeCreated(**employee_response(employee).model_dump())
 
 
@@ -119,9 +137,10 @@ def read_employee(
 
 
 @router.patch("/employees/{employee_id}", response_model=EmployeeResponse)
-def update_employee(
+async def update_employee(
     employee_id: uuid.UUID,
     payload: EmployeeUpdate,
+    request: Request,
     _: Claims = Depends(require("HR_ADMIN")),
     db: Session = Depends(get_db),
 ) -> EmployeeResponse:
@@ -154,13 +173,24 @@ def update_employee(
             setattr(employee, field, value)
     if payload.grade is not None:
         employee.pto_entitlement_days = GRADE_ENTITLEMENTS.get(payload.grade, 0)
+        changes["pto_entitlement_days"] = employee.pto_entitlement_days
     commit_employee(db, employee)
+    await publish(
+        "identity.events",
+        "employee.updated",
+        {
+            "employee_id": str(employee.id),
+            "changed": {key: serialize_change(value) for key, value in changes.items()},
+        },
+        request.state.correlation_id,
+    )
     return employee_response(employee)
 
 
 @router.post("/employees/{employee_id}/deactivate", response_model=EmployeeResponse)
-def deactivate_employee(
+async def deactivate_employee(
     employee_id: uuid.UUID,
+    request: Request,
     _: Claims = Depends(require("HR_ADMIN")),
     db: Session = Depends(get_db),
 ) -> EmployeeResponse:
@@ -177,4 +207,10 @@ def deactivate_employee(
         )
     employee.status = EmployeeStatus.INACTIVE
     commit_employee(db, employee)
+    await publish(
+        "identity.events",
+        "employee.deactivated",
+        {"employee_id": str(employee.id)},
+        request.state.correlation_id,
+    )
     return employee_response(employee)
